@@ -2,62 +2,73 @@
 install.packages(c("quantmod","dplyr","ggplot2","zoo","broom"))
 
 # ----- Setup -----
-# If you don't have a package, install once with: install.packages("packageName")
-library(quantmod)   # pulls data from FRED without an API key
-library(dplyr)
-library(ggplot2)
-library(zoo)        # yearqtr helper
-library(broom)  # for tidy model output
+# If you don't have a package, install once with: install.packages("packageName")  # Tip: install missing packages only once, outside class time if possible
 
-# ----- 1) Get the data -----
-getSymbols(c("GDPC1", "UNRATE"), src = "FRED")  # Real GDP (q), Unemployment rate (m)
+library(quantmod)   # Load quantmod to fetch macro time series (e.g., from FRED) into R as time-series objects
+library(dplyr)      # Load dplyr for data wrangling (mutate, group_by, summarise, arrange, etc.)
+library(ggplot2)    # Load ggplot2 for plotting charts
+library(zoo)        # Load zoo for working with quarterly dates via as.yearqtr()
+library(broom)      # for tidy model output  # Optional helper for turning lm() results into tidy data frames
 
-# ----- 2) Make quarterly growth and ∆u -----
-gdp_q <- GDPC1 |>
-  as.data.frame() |>
-  tibble::rownames_to_column("date") |>
-  mutate(date = as.Date(date),
-         qtr = as.yearqtr(date)) |>
-  group_by(qtr) |>
-  summarise(gdp = first(GDPC1), .groups = "drop") |>
-  arrange(qtr) |>
-  mutate(g_q_ann = 400 * (log(gdp) - log(dplyr::lag(gdp))))  # q/q annualized log growth
+# ----- 1) Get the data -----  # Download real GDP and unemployment rate from FRED
 
-unemp_q <- UNRATE |>
-  as.data.frame() |>
-  tibble::rownames_to_column("date") |>
-  mutate(date = as.Date(date),
-         qtr = as.yearqtr(date)) |>
-  group_by(qtr) |>
-  summarise(u = mean(UNRATE, na.rm = TRUE), .groups = "drop") |>
-  arrange(qtr) |>
-  mutate(d_u = u - dplyr::lag(u))
+getSymbols(c("GDPC1", "UNRATE"), src = "FRED")  # Pull GDPC1 (real GDP, quarterly) and UNRATE (unemployment rate, monthly) into the workspace as xts objects
 
-okun <- gdp_q |>
-  inner_join(unemp_q, by = c("qtr")) |>
-  filter(!is.na(g_q_ann), !is.na(d_u)) |>
-  mutate(period = ifelse(qtr < as.yearqtr("1984 Q1"), "1960–1984", "1985–present"))
+# ----- 2) Make quarterly growth and ∆u -----  # Transform raw series into the variables we need
 
-# ----- 3) Recreate the Spark chart -----
-p <- ggplot(okun, aes(x = g_q_ann, y = d_u)) +
-  geom_point(alpha = 0.65) +
-  geom_smooth(method = "lm", se = FALSE) +
-  labs(title = "Okun’s Law: Growth vs Change in Unemployment (U.S., quarterly)",
-       x = "Real GDP growth (q/q annualized, %)",
-       y = "Change in unemployment rate (pp)",
-       caption = "Source: FRED GDPC1 & UNRATE (UNRATE averaged to quarters)") +
-  theme_minimal()
-    
-p
+gdp_q <- GDPC1 |>                               # Start from the GDPC1 xts object (quarterly)
+  as.data.frame() |>                            # Convert xts to a plain data frame (dates become row names)
+  tibble::rownames_to_column("date") |>         # Move row names (dates) into a proper column called 'date'
+  mutate(date = as.Date(date),                  # Convert the 'date' text into Date objects
+         qtr = as.yearqtr(date)) |>             # Convert Date to quarterly period (e.g., 2020 Q2)
+  group_by(qtr) |>                              # Group by quarter (redundant for quarterly GDP, but keeps pattern consistent)
+  summarise(gdp = first(GDPC1), .groups = "drop") |>  # Take the (only) GDP value per quarter and drop the grouping
+  arrange(qtr) |>                               # Ensure quarters are in chronological order
+  mutate(g_q_ann = 400 * (log(gdp) - log(dplyr::lag(gdp))))  # Compute q/q annualized log growth: 4*100*(ln Y_t − ln Y_{t-1})
 
-ggsave("okun_scatter.png", p, width = 7, height = 5, dpi = 150)
+unemp_q <- UNRATE |>                            # Start from the monthly unemployment rate xts object
+  as.data.frame() |>                            # Convert xts to data frame (dates as row names)
+  tibble::rownames_to_column("date") |>         # Make those dates a column named 'date'
+  mutate(date = as.Date(date),                  # Parse date strings into Date objects
+         qtr = as.yearqtr(date)) |>             # Map each month to its quarter (e.g., 2020-05 -> 2020 Q2)
+  group_by(qtr) |>                              # Group by quarter to aggregate months
+  summarise(u = mean(UNRATE, na.rm = TRUE), .groups = "drop") |>  # Average monthly unemployment to a quarterly mean
+  arrange(qtr) |>                               # Order quarters chronologically
+  mutate(d_u = u - dplyr::lag(u))               # Compute the quarter-to-quarter change in unemployment (percentage points)
 
-# ----- 4) Estimate the slope (Okun coefficient) -----
-mod_all   <- lm(d_u ~ g_q_ann, data = okun)
-mod_early <- lm(d_u ~ g_q_ann, data = subset(okun, period == "1960–1984"))
-mod_late  <- lm(d_u ~ g_q_ann, data = subset(okun, period == "1985–present"))
+okun <- gdp_q |>                                # Begin with the quarterly GDP table
+  inner_join(unemp_q, by = c("qtr")) |>         # Join to the unemployment table by matching quarters
+  filter(!is.na(g_q_ann), !is.na(d_u)) |>       # Drop the first row(s) where lagged values produce NAs
+  mutate(period = ifelse(qtr < as.yearqtr("1984 Q1"), "1960–1984", "1985–present"))  # Tag each quarter as 'early' vs 'late' for slope comparison
 
-print(summary(mod_all)$coefficients)
-print(summary(mod_early)$coefficients)
-print(summary(mod_late)$coefficients)
+# ----- 3) Recreate the Spark chart -----  # Build the Okun’s Law scatter with a fitted line
+
+p <- ggplot(okun, aes(x = g_q_ann, y = d_u)) +  # Initialize a ggplot: x = GDP growth, y = change in unemployment
+  geom_point(alpha = 0.65) +                    # Plot each quarter as a semi-transparent point (overlap shows density)
+  geom_smooth(method = "lm", se = FALSE) +      # Add a straight best-fit (linear model) line; no shaded confidence band
+  labs(title = "Okun’s Law: Growth vs Change in Unemployment (U.S., quarterly)",  # Title for the figure
+       x = "Real GDP growth (q/q annualized, %)",                                  # X-axis label
+       y = "Change in unemployment rate (pp)",                                     # Y-axis label
+       caption = "Source: FRED GDPC1 & UNRATE (UNRATE averaged to quarters)") +    # Data source footnote
+  theme_minimal()                              # Use a clean theme that keeps focus on the data
+
+ggsave("okun_scatter.png", p, width = 7, height = 5, dpi = 150)  # Save the plot as a 7x5 inch, 150 dpi PNG for your repo/journal
+
+# ----- 4) Estimate the slope (Okun coefficient) -----  # Run simple regressions to quantify the slope
+
+mod_all   <- lm(d_u ~ g_q_ann, data = okun)                    # Regress ∆u on growth for the full sample (slope ≈ Okun’s coefficient)
+mod_early <- lm(d_u ~ g_q_ann, data = subset(okun, period == "1960–1984"))  # Same regression for the 'early' period subset
+mod_late  <- lm(d_u ~ g_q_ann, data = subset(okun, period == "1985–present"))  # Same regression for the 'late' period subset
+
+print(summary(mod_all)$coefficients)    # Show coefficient table (intercept, slope, std. errors, t-stats, p-values) for full sample
+print(summary(mod_early)$coefficients)  # Show coefficient table for the early subsample
+print(summary(mod_late)$coefficients)   # Show coefficient table for the late subsample
 ```
+
+Below this line, answer the following questions. Remember r code needs to be surrounded by ``` and the first should have {r} (see the code chunk above for an example).
+
+1. What did today's data convince you of about the relationship between output and unemployment?
+2. What do the three print() command results mean, in your own words? If you haven't seen regression output before, this might be helpful: https://towardsdatascience.com/understanding-linear-regression-output-in-r-7a9cbda948b3/
+3. Do you see any outliers? What period(s) do you think they represent?
+4. How could you update your "linear model" lm() commands to remove the effects of these outlier(s)?
+5. How might we use the IS-LM model from ECON 313 to explain the outlier(s)? What does the IS-LM model NOT have that would help to explain the outlier(s)?
