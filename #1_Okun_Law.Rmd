@@ -1,0 +1,63 @@
+```{r}
+install.packages(c("quantmod","dplyr","ggplot2","zoo","broom"))
+
+# ----- Setup -----
+# If you don't have a package, install once with: install.packages("packageName")
+library(quantmod)   # pulls data from FRED without an API key
+library(dplyr)
+library(ggplot2)
+library(zoo)        # yearqtr helper
+library(broom)  # for tidy model output
+
+# ----- 1) Get the data -----
+getSymbols(c("GDPC1", "UNRATE"), src = "FRED")  # Real GDP (q), Unemployment rate (m)
+
+# ----- 2) Make quarterly growth and ∆u -----
+gdp_q <- GDPC1 |>
+  as.data.frame() |>
+  tibble::rownames_to_column("date") |>
+  mutate(date = as.Date(date),
+         qtr = as.yearqtr(date)) |>
+  group_by(qtr) |>
+  summarise(gdp = first(GDPC1), .groups = "drop") |>
+  arrange(qtr) |>
+  mutate(g_q_ann = 400 * (log(gdp) - log(dplyr::lag(gdp))))  # q/q annualized log growth
+
+unemp_q <- UNRATE |>
+  as.data.frame() |>
+  tibble::rownames_to_column("date") |>
+  mutate(date = as.Date(date),
+         qtr = as.yearqtr(date)) |>
+  group_by(qtr) |>
+  summarise(u = mean(UNRATE, na.rm = TRUE), .groups = "drop") |>
+  arrange(qtr) |>
+  mutate(d_u = u - dplyr::lag(u))
+
+okun <- gdp_q |>
+  inner_join(unemp_q, by = c("qtr")) |>
+  filter(!is.na(g_q_ann), !is.na(d_u)) |>
+  mutate(period = ifelse(qtr < as.yearqtr("1984 Q1"), "1960–1984", "1985–present"))
+
+# ----- 3) Recreate the Spark chart -----
+p <- ggplot(okun, aes(x = g_q_ann, y = d_u)) +
+  geom_point(alpha = 0.65) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Okun’s Law: Growth vs Change in Unemployment (U.S., quarterly)",
+       x = "Real GDP growth (q/q annualized, %)",
+       y = "Change in unemployment rate (pp)",
+       caption = "Source: FRED GDPC1 & UNRATE (UNRATE averaged to quarters)") +
+  theme_minimal()
+    
+p
+
+ggsave("okun_scatter.png", p, width = 7, height = 5, dpi = 150)
+
+# ----- 4) Estimate the slope (Okun coefficient) -----
+mod_all   <- lm(d_u ~ g_q_ann, data = okun)
+mod_early <- lm(d_u ~ g_q_ann, data = subset(okun, period == "1960–1984"))
+mod_late  <- lm(d_u ~ g_q_ann, data = subset(okun, period == "1985–present"))
+
+print(summary(mod_all)$coefficients)
+print(summary(mod_early)$coefficients)
+print(summary(mod_late)$coefficients)
+```
