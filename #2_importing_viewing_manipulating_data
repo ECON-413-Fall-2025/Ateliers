@@ -1,0 +1,68 @@
+# 01_starter_atelier.R
+# Load → Peek → Manipulate
+# ECON 413
+
+# Setup ----
+# (If running locally and tidyverse isn't installed, remove the "#" below and run once)
+# install.packages("tidyverse")
+
+library(tidyverse)  # loads dplyr, ggplot2, tibble, readr, etc.
+
+# Data ----
+# We'll use a built-in macro dataset that ships with ggplot2: `economics`
+# It has monthly U.S. series like unemployment and personal saving rate.
+econ <- ggplot2::economics |> as_tibble()
+
+# Peek ----
+glimpse(econ)
+glimpse(subset(econ,select = c(date,pce,psavert))) # column names and types
+head(econ, 3)            # first 3 rows
+head(subset(econ,select = c(date,pce,psavert)),5)
+
+# Manipulate (one tiny move) ----
+# Keep just a few columns, filter to 2000+, and create a new "unemploy_millions" column.
+econ_small <- econ |>
+  dplyr::select(date, unemploy, uempmed, psavert) |>
+  dplyr::filter(date >= as.Date("2000-01-01")) |>
+  dplyr::mutate(unemploy_millions = unemploy / 1000)
+
+# Show result
+print(econ_small, n = 6)
+
+# (Optional) Quick plot ----
+# One line to see the new column over time.
+ggplot(econ_small, aes(x = date, y = unemploy_millions) +
+  geom_line() +
+  labs(title = "U.S. Unemployed (millions), 2000–present",
+       x = NULL, y = "Millions")
+
+# How to make a second y-axis
+
+# There's a trick to do this: scale up the smaller series to live on the same
+# y-axis as the bigger one. As if you were plotting both on the same y-axis.
+# Then create a second y-axis that "undoes" the scale. The two series are 
+# technically still plotted against the left y-axis. We just happen to read one
+# of them in the units on the right axis.
+scale <- max(econ_small$unemploy_millions, na.rm = TRUE) / 
+  max(econ_small$psavert,            na.rm = TRUE)
+
+ggplot(econ_small, aes(x = date)) +
+  geom_line(aes(y = unemploy_millions, color = "Unemployed (millions)")) +
+  geom_line(aes(y = psavert * scale,   color = "Personal Savings Rate")) +
+  scale_y_continuous(
+    name = "U.S. Unemployed (millions)",
+    sec.axis = sec_axis(~ . / scale, name = "Personal Savings Rate (%)")
+  ) +
+  scale_color_manual(values = c("Unemployed (millions)" = "steelblue",
+                                "Personal Savings Rate" = "firebrick")) +
+  labs(title = "U.S. Unemployed vs. Personal Saving Rate",
+       x = NULL, color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# To Do in groups:
+# 1. Look at the data import code from the other Atelier to pull data from FRED-QD.
+# 2. Use glimpse and head to look at real GDP, unemployment rate, and PCE deflator
+# 3. Plot real GDP and unemployment rate on two separate axes in the same figure
+# 4. Plot the unemployment rate and the PCE deflator on two separate axes in the same figure
+# 5. Discuss how what you see relates to Okun's Law and the Phillips Curve from ECON 313
