@@ -31,7 +31,7 @@ print(econ_small, n = 6)
 
 # (Optional) Quick plot ----
 # One line to see the new column over time.
-ggplot(econ_small, aes(x = date, y = unemploy_millions) +
+ggplot(econ_small, aes(x = date, y = unemploy_millions)) +
   geom_line() +
   labs(title = "U.S. Unemployed (millions), 2000–present",
        x = NULL, y = "Millions")
