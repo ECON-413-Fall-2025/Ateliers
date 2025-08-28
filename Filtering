@@ -1,0 +1,255 @@
+# ===============================
+# ECON 413 — STL with tsibble + feasts
+# Quantmod default, 1960Q1–2020Q1 truncation,
+# and seasonal panel as one 4-quarter cycle
+# ===============================
+
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  tidyverse, lubridate, tsibble, feasts,
+  quantmod, zoo, patchwork
+)
+
+# -------------------------------
+# 0) Globals: truncation window
+# -------------------------------
+Q_START <- tsibble::yearquarter("1960 Q1")
+Q_END   <- tsibble::yearquarter("2019 Q4")
+
+# -------------------------------
+# 1) Quantmod fetch (FRED)
+# -------------------------------
+fetch_series_qm <- function(id) {
+  xt <- quantmod::getSymbols(Symbols = id, src = "FRED", auto.assign = FALSE)
+  tibble(
+    date  = as.Date(zoo::index(xt)),
+    value = as.numeric(xt[, 1])
+  ) |>
+    arrange(date)
+}
+
+# -------------------------------
+# 2) Convert to quarterly tsibble
+#    (monthly → quarterly mean)
+# -------------------------------
+to_quarterly_tsibble <- function(df) {
+  df <- df |> mutate(q = tsibble::yearquarter(date))
+  max_per_q <- df |> count(q) |> summarise(max_n = max(n)) |> pull(max_n)
+  ts_q <- if (max_per_q > 1) {
+    df |>
+      group_by(q) |>
+      summarise(value = mean(value, na.rm = TRUE), .groups = "drop") |>
+      as_tsibble(index = q)
+  } else {
+    df |>
+      select(q, value) |>
+      as_tsibble(index = q)
+  }
+  ts_q |> rename(quarter = q)
+}
+
+# -------------------------------
+# 3) Truncate helper
+# -------------------------------
+truncate_window <- function(tsbl, q_start = Q_START, q_end = Q_END) {
+  tsbl |> filter(quarter >= q_start, quarter <= q_end)
+}
+
+# -------------------------------
+# 4) STL decomposition (feasts)
+#    Return components + quarter-of-year for seasonal cycle
+# -------------------------------
+stl_decompose <- function(tsbl, label) {
+  fit <- tsbl |> model(STL(value ~ season(window = "periodic"), robust = TRUE))
+  comps <- components(fit) |> as_tibble()
+  comps |>
+    transmute(
+      quarter,
+      trend,
+      seasonal  = season_year,
+      remainder
+    ) |>
+    mutate(series = label,
+           qtr = lubridate::quarter(as.Date(quarter)))  # 1..4
+}
+
+# -------------------------------
+# 5) Plot helpers
+# -------------------------------
+# (A) Time-series panels: Trend & Business Cycle
+# ---- plotting helpers (no patchwork needed) ----
+plot_trend_remainder <- function(comp_df, title_text) {
+  comp_df |>
+    select(quarter, trend, remainder) |>
+    pivot_longer(-quarter, names_to = "component", values_to = "value") |>
+    mutate(component = factor(
+      component,
+      levels = c("trend", "remainder"),
+      labels = c("Trend", "Business Cycle / Remainder")
+    )) |>
+    ggplot(aes(quarter, value)) +
+    geom_line() +
+    facet_wrap(~ component, ncol = 1, scales = "free_y") +
+    labs(title = paste0(title_text, " — Trend & Business Cycle"), x = NULL, y = NULL) +
+    theme_minimal(base_size = 12) +
+    theme(strip.text = element_text(face = "bold"),
+          plot.title = element_text(face = "bold", hjust = 0))
+}
+
+plot_seasonal_cycle <- function(comp_df, title_text) {
+  cyc <- comp_df |>
+    group_by(qtr) |>
+    summarise(seasonal = mean(seasonal, na.rm = TRUE), .groups = "drop") |>
+    mutate(qtr_lab = factor(paste0("Q", qtr), levels = paste0("Q", 1:4)))
+  
+  ggplot(cyc, aes(qtr_lab, seasonal, group = 1)) +
+    geom_hline(yintercept = 0, linewidth = 0.3) +
+    geom_point(size = 2) +
+    geom_line() +
+    labs(title = paste0(title_text, " — Seasonal (One 4Q Cycle)"), x = NULL, y = NULL) +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold", hjust = 0))
+}
+
+
+# -------------------------------
+# 6) Labels (as requested)
+# -------------------------------
+labels <- c(
+  GDPC1   = "Real GDP",
+  PCECC96 = "Consumption",
+  PNFI    = "Non-residential Fixed Investment",  # using PNFI; PNFIx often not public
+  INDPRO  = "Industrial Productivity",
+  PCECTPI = "Inflation: PCED"
+)
+
+# -------------------------------
+# 7) Fetch → quarterly → truncate
+# -------------------------------
+gdp   <- fetch_series_qm("GDPC1")   |> to_quarterly_tsibble() |> truncate_window()
+cons  <- fetch_series_qm("PCECC96") |> to_quarterly_tsibble() |> truncate_window()
+nrfi  <- fetch_series_qm("PNFI")    |> to_quarterly_tsibble() |> truncate_window()
+ip    <- fetch_series_qm("INDPRO")  |> to_quarterly_tsibble() |> truncate_window()
+pced  <- fetch_series_qm("PCECTPI") |> to_quarterly_tsibble() |> truncate_window()
+
+# -------------------------------
+# 8) STL
+# -------------------------------
+gdp_c  <- stl_decompose(gdp,  labels[["GDPC1"]])
+cons_c <- stl_decompose(cons, labels[["PCECC96"]])
+nrfi_c <- stl_decompose(nrfi, labels[["PNFI"]])
+ip_c   <- stl_decompose(ip,   labels[["INDPRO"]])
+pced_c <- stl_decompose(pced, labels[["PCECTPI"]])
+
+# -------------------------------
+# 9) Per-series component figures
+# -------------------------------
+print(plot_trend_remainder(gdp_c, labels[["GDPC1"]]))
+print(plot_seasonal_cycle(gdp_c,  labels[["GDPC1"]]))
+
+print(plot_trend_remainder(gdp_c, labels[["PCECC96"]]))
+print(plot_seasonal_cycle(gdp_c,  labels[["PCECC96"]]))
+
+print(plot_trend_remainder(gdp_c, labels[["PNFI"]]))
+print(plot_seasonal_cycle(gdp_c,  labels[["PNFI"]]))
+
+print(plot_trend_remainder(gdp_c, labels[["INDPRO"]]))
+print(plot_seasonal_cycle(gdp_c,  labels[["INDPRO"]]))
+
+print(plot_trend_remainder(gdp_c, labels[["PCECTPI"]]))
+print(plot_seasonal_cycle(gdp_c,  labels[["PCECTPI"]]))
+
+# -------------------------------
+# 10) Combined BC overlay (truncated window)
+# -------------------------------
+bc_all <- bind_rows(gdp_c, cons_c, nrfi_c, ip_c, pced_c) |>
+  transmute(quarter, value = remainder, series)
+
+p_bc <- ggplot(bc_all, aes(quarter, value, color = series)) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  geom_line(linewidth = 0.8) +
+  labs(
+    title = "Business Cycle (STL Remainder) — 1960Q1–2019Q4",
+    x = NULL, y = "Deviation from STL Trend", color = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0),
+        legend.position = "bottom",
+        legend.key.width = unit(1.6, "lines"))
+
+print(p_bc)
+# ggsave("business_cycle_combined_1960_2020.png", p_bc, width = 10, height = 6, dpi = 300)
+
+# ===============================
+# ADDITION: Trend–Cycle split with LOESS (no seasonal term)
+# ===============================
+
+# Fit a smooth LOESS trend on the time index, then cycle = value - trend
+# 'span' controls smoothness (0.15–0.35 works well for quarterly macro data)
+loess_trend_cycle <- function(tsbl, label, span = 0.25, degree = 1) {
+  df <- tsbl %>%
+    as_tibble() %>%
+    mutate(t = as.numeric(quarter))  # yearquarter -> numeric index
+  
+  fit <- stats::loess(value ~ t, data = df, span = span, degree = degree, na.action = na.exclude)
+  df$trend <- as.numeric(predict(fit, newdata = df["t"]))
+  df$remainder <- df$value - df$trend
+  
+  df %>%
+    transmute(
+      quarter,
+      trend,
+      remainder,
+      series = label
+    )
+}
+
+plot_trend_cycle <- function(comp_df, title_text) {
+  comp_df %>%
+    select(quarter, trend, remainder) %>%
+    pivot_longer(-quarter, names_to = "component", values_to = "value") %>%
+    mutate(component = factor(component,
+                              levels = c("trend", "remainder"),
+                              labels = c("Trend", "Business Cycle"))) %>%
+    ggplot(aes(quarter, value)) +
+    geom_line() +
+    facet_wrap(~ component, ncol = 1, scales = "free_y") +
+    labs(title = paste0(title_text, " — Trend vs Cycle (LOESS)"),
+         x = NULL, y = NULL) +
+    theme_minimal(base_size = 12) +
+    theme(strip.text = element_text(face = "bold"),
+          plot.title = element_text(face = "bold", hjust = 0))
+}
+
+# ---- recompute with LOESS (no seasonality) ----
+gdp_nc  <- loess_trend_cycle(gdp,  labels[["GDPC1"]],   span = 0.25)
+cons_nc <- loess_trend_cycle(cons, labels[["PCECC96"]], span = 0.25)
+nrfi_nc <- loess_trend_cycle(nrfi, labels[["PNFI"]],    span = 0.25)
+ip_nc   <- loess_trend_cycle(ip,   labels[["INDPRO"]],  span = 0.25)
+pced_nc <- loess_trend_cycle(pced, labels[["PCECTPI"]], span = 0.25)
+
+# ---- per-series Trend vs Cycle plots ----
+print(plot_trend_cycle(gdp_nc,  labels[["GDPC1"]]))
+print(plot_trend_cycle(cons_nc, labels[["PCECC96"]]))
+print(plot_trend_cycle(nrfi_nc, labels[["PNFI"]]))
+print(plot_trend_cycle(ip_nc,   labels[["INDPRO"]]))
+print(plot_trend_cycle(pced_nc, labels[["PCECTPI"]]))
+
+# ---- combined cycle overlay (no seasonality) ----
+bc_all_nc <- bind_rows(gdp_nc, cons_nc, nrfi_nc, ip_nc, pced_nc) %>%
+  transmute(quarter, value = remainder, series)
+
+p_bc_nc <- ggplot(bc_all_nc, aes(quarter, value, color = series)) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  geom_line(linewidth = 0.8) +
+  labs(
+    title = "Business Cycle (LOESS Remainder, No Seasonality) — 1960Q1–2020Q1",
+    x = NULL, y = "Deviation from LOESS Trend", color = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0),
+        legend.position = "bottom",
+        legend.key.width = unit(1.6, "lines"))
+
+print(p_bc_nc)
+# ggsave("business_cycle_combined_loess_1960_2020.png", p_bc_nc, width = 10, height = 6, dpi = 300)
